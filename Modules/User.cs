@@ -1,14 +1,21 @@
-namespace Bangazon.Modules
+using System.ComponentModel.DataAnnotations;
+using System.Collections.Generic;
+
+namespace Bangazon.Modules;
+
+public class User
 {
-    public class User
-    {
-        public int Id { get; set; }  // Only for SQL visibility
-        public string UId { get; set; } // Firebase UID
-        public string FirstName { get; set; }
-        public string LastName { get; set; }
-        public string Email { get; set; }
-        public string Address { get; set; }
-        public string City { get; set; }
-        public int Zip { get; set; }
-    }
+  [Key]
+  public string Uid { get; set; }  // ✅ Firebase UID as primary key
+
+  public string FirstName { get; set; }
+  public string LastName { get; set; }
+  public string Email { get; set; }
+  public string Address { get; set; }
+  public string City { get; set; }
+  public string State { get; set; }
+  public string Zip { get; set; }
+
+  public List<Order> Orders { get; set; } = new List<Order>();  // ✅ Ensure non-null List
+  public List<UserPaymentMethod> UserPaymentMethods { get; set; } = new List<UserPaymentMethod>();
 }
