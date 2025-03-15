@@ -26,11 +26,11 @@ builder.Services.Configure<JsonOptions>(options =>
     options.SerializerOptions.ReferenceHandler = ReferenceHandler.IgnoreCycles;
 });
 
-// ✅ CORS Policy (Allow frontend at `localhost:3000`)
+//  CORS Policy (Allow frontend at `localhost:3000`)
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowFrontend", policy =>
-        policy.WithOrigins("http://localhost:3000") // ✅ Adjusted origin for your frontend
+        policy.WithOrigins("http://localhost:3000") //  Adjusted origin for your frontend
               .AllowAnyMethod()
               .AllowAnyHeader()
               .AllowCredentials());
@@ -97,57 +97,122 @@ app.MapGet("/cart/{userId}", async (BangazonDbContext db, string userId) =>
 });
 
 // Add to Cart
-app.MapPost("/cart/add", async (BangazonDbContext db, string userId, int productId, int quantity) =>
+app.MapPost("/cart/add", async (BangazonDbContext db, HttpContext context) =>
 {
-    var cart = await db.Carts.FirstOrDefaultAsync(c => c.UserId == userId);
+    var requestData = await context.Request.ReadFromJsonAsync<CartRequest>();
+    if (requestData == null) return Results.BadRequest("Invalid request format.");
+
+    var cart = db.Carts.FirstOrDefault(c => c.UserId == requestData.UserId);
 
     if (cart == null)
     {
-        cart = new Cart { UserId = userId };
+        cart = new Cart { UserId = requestData.UserId };
         db.Carts.Add(cart);
-        await db.SaveChangesAsync();
+        db.SaveChanges();
     }
 
-    var cartItem = await db.CartItems.FirstOrDefaultAsync(ci => ci.CartId == cart.Id && ci.ProductId == productId);
+    var cartItem = db.CartItems.FirstOrDefault(ci => ci.CartId == cart.Id && ci.ProductId == requestData.ProductId);
 
     if (cartItem == null)
     {
-        cartItem = new CartItem { CartId = cart.Id, ProductId = productId, Quantity = quantity };
+        cartItem = new CartItem { CartId = cart.Id, ProductId = requestData.ProductId, Quantity = requestData.Quantity };
         db.CartItems.Add(cartItem);
     }
     else
     {
-        cartItem.Quantity += quantity;
+        cartItem.Quantity += requestData.Quantity;
+    }
+
+    db.SaveChanges();
+    return Results.Ok(cart);
+});
+
+// ✅ Define a DTO (Data Transfer Object) for the Request
+// Move this class outside the top-level statements
+
+
+app.MapPut("/cart/update/{userId}", async (BangazonDbContext db, string userId, HttpContext context) =>
+{
+    var requestData = await context.Request.ReadFromJsonAsync<UpdateCartRequest>();
+    if (requestData == null) return Results.BadRequest("Invalid request format.");
+
+    // ✅ Ensure the user's cart exists
+    var cart = await db.Carts
+        .Include(c => c.CartItems)
+        .FirstOrDefaultAsync(c => c.UserId == userId);
+
+    if (cart == null) return Results.NotFound($"No cart found for user {userId}.");
+
+    // ✅ Find the cart item by ProductId
+    var cartItem = cart.CartItems.FirstOrDefault(ci => ci.ProductId == requestData.ProductId);
+    if (cartItem == null) return Results.NotFound($"Product with ID {requestData.ProductId} not found in cart.");
+
+    // ✅ If quantity is 0, remove item from cart
+    if (requestData.NewQuantity <= 0)
+    {
+        db.CartItems.Remove(cartItem);
+    }
+    else
+    {
+        cartItem.Quantity = requestData.NewQuantity;
     }
 
     await db.SaveChangesAsync();
     return Results.Ok(cart);
 });
 
-// ✅ ORDER Calls
 
-// Get Orders by Seller
-app.MapGet("/orders/sellers/{sellerId}", async (BangazonDbContext db, string sellerId) =>
+
+
+// ✅ Remove a Single Product from the Cart
+app.MapDelete("/cart/delete/{userId}/{productId}", async (BangazonDbContext db, string userId, int productId) =>
 {
-    var orders = await db.Orders
-        .Where(o => o.IsComplete && o.OrderItems.Any(oi => oi.SellerId == sellerId))
-        .Include(o => o.OrderItems)
-        .ThenInclude(oi => oi.Product)
-        .ToListAsync();
+    var cart = await db.Carts
+        .Include(c => c.CartItems)
+        .FirstOrDefaultAsync(c => c.UserId == userId);
 
-    return orders.Any() ? Results.Ok(orders) : Results.NotFound();
+    if (cart == null) return Results.NotFound("Cart not found.");
+
+    // ✅ Find the cart item by ProductId
+    var cartItem = cart.CartItems.FirstOrDefault(ci => ci.ProductId == productId);
+    if (cartItem == null) return Results.NotFound($"Product with ID {productId} not found in cart.");
+
+    // ✅ Remove the single product from the cart
+    db.CartItems.Remove(cartItem);
+    await db.SaveChangesAsync();
+
+    return Results.NoContent();
 });
 
-// Complete Order (Moves Items to Order and Clears the Cart)
-app.MapPost("/orders/complete", async (BangazonDbContext db, string userId) =>
+
+
+// ✅ ORDER Calls
+
+
+
+app.MapPost("/orders/complete", async (BangazonDbContext db, HttpContext context) =>
 {
-    var cart = await db.Carts.Include(c => c.CartItems).FirstOrDefaultAsync(c => c.UserId == userId);
-    if (cart == null || !cart.CartItems.Any()) return Results.BadRequest("Cart is empty");
+    var requestData = await context.Request.ReadFromJsonAsync<CompleteOrderRequest>();
+    if (requestData == null) return Results.BadRequest("Invalid request format.");
+
+    var cart = await db.Carts
+        .Include(c => c.CartItems)
+        .FirstOrDefaultAsync(c => c.UserId == requestData.UserId);
+
+    if (cart == null || !cart.CartItems.Any()) 
+        return Results.BadRequest("Cart is empty or does not exist.");
+
+    // 🔥 Instead of using "paymentMethodId", we fetch "paymentOptionId" from UserPaymentMethods
+    var userPaymentMethod = await db.UserPaymentMethods
+        .FirstOrDefaultAsync(upm => upm.UserId == requestData.UserId && upm.PaymentOptionId == requestData.PaymentOptionId);
+
+    if (userPaymentMethod == null)
+        return Results.BadRequest("Invalid payment option. The user must have this payment method.");
 
     var order = new Order
     {
-        CustomerId = userId,
-        UserPaymentMethodId = cart.UserPaymentMethodId,
+        CustomerId = requestData.UserId,
+        UserPaymentMethodId = userPaymentMethod.Id, // ✅ Now storing the correct payment method reference
         IsComplete = false,
         OrderDate = DateTime.UtcNow
     };
@@ -159,8 +224,7 @@ app.MapPost("/orders/complete", async (BangazonDbContext db, string userId) =>
     {
         OrderId = order.Id,
         ProductId = ci.ProductId,
-        Quantity = ci.Quantity,
-        SellerId = db.Products.FirstOrDefault(p => p.Id == ci.ProductId)?.SellerId ?? ""
+        Quantity = ci.Quantity
     }).ToList();
 
     db.OrderItems.AddRange(orderItems);
@@ -170,6 +234,32 @@ app.MapPost("/orders/complete", async (BangazonDbContext db, string userId) =>
 
     return Results.Ok(order);
 });
+
+
+// ✅ Add a Payment Method to a User
+app.MapPost("/user-payment-methods", async (BangazonDbContext db, HttpContext context) =>
+{
+    var requestData = await context.Request.ReadFromJsonAsync<UserPaymentMethodRequest>();
+    if (requestData == null) return Results.BadRequest("Invalid request format.");
+
+    var userExists = await db.Users.AnyAsync(u => u.Uid == requestData.UserId);
+    if (!userExists) return Results.NotFound("User not found.");
+
+    var paymentOptionExists = await db.PaymentOptions.AnyAsync(po => po.Id == requestData.PaymentOptionId);
+    if (!paymentOptionExists) return Results.NotFound("Invalid payment option.");
+
+    var userPaymentMethod = new UserPaymentMethod
+    {
+        UserId = requestData.UserId,
+        PaymentOptionId = requestData.PaymentOptionId
+    };
+
+    db.UserPaymentMethods.Add(userPaymentMethod);
+    await db.SaveChangesAsync();
+
+    return Results.Created($"/user-payment-methods/{userPaymentMethod.Id}", userPaymentMethod);
+});
+
 
 // ✅ PRODUCT Calls
 
@@ -200,21 +290,87 @@ app.MapGet("/products/search", async (BangazonDbContext db, string? searchTerm) 
     return products.Any() ? Results.Ok(products) : Results.NotFound("No products found.");
 });
 
-// Search Sellers
-app.MapGet("/sellers/search", async (BangazonDbContext db, string searchTerm) =>
+// ✅ CATEGORY Calls
+
+app.MapGet("/categories", (BangazonDbContext db) =>
 {
-    var sellerUids = await db.Users
-        .Where(u => u.FirstName.ToLower().Contains(searchTerm.ToLower()) || u.LastName.ToLower().Contains(searchTerm.ToLower()))
-        .Select(u => u.Uid)
-        .ToListAsync();
-
-    if (!sellerUids.Any()) return Results.NotFound("No sellers found.");
-
-    var sellers = await db.Users.Where(u => sellerUids.Contains(u.Uid))
-        .Select(u => new { u.Uid, u.FirstName, u.LastName, u.Email })
-        .ToListAsync();
-
-    return sellers.Any() ? Results.Ok(sellers) : Results.NotFound("No matching sellers with products found.");
+    return Results.Ok(db.Categories.ToList());
 });
 
+app.MapGet("/categories/{categoryId}", (BangazonDbContext db, int categoryId) =>
+{
+    var category = db.Categories.FirstOrDefault(c => c.Id == categoryId);
+    return category != null ? Results.Ok(category) : Results.NotFound();
+});
+
+app.MapPost("/categories", async (BangazonDbContext db, Category category) =>
+{
+    if (string.IsNullOrWhiteSpace(category.Title))
+    {
+        return Results.BadRequest("Category title is required.");
+    }
+
+    db.Categories.Add(category);
+    await db.SaveChangesAsync();
+    
+    return Results.Created($"/categories/{category.Id}", category);
+});
+
+
+app.MapDelete("/categories/{categoryId}", (BangazonDbContext db, int categoryId) =>
+{
+    var category = db.Categories.Include(c => c.Products).FirstOrDefault(c => c.Id == categoryId);
+
+    if (category == null) return Results.NotFound("Category not found.");
+
+    if (category.Products.Any())
+    {
+        return Results.BadRequest("Cannot delete category with existing products.");
+    }
+
+    db.Categories.Remove(category);
+    db.SaveChanges();
+    return Results.NoContent();
+});
+
+
+app.MapGet("/products/category/{categoryId}", (BangazonDbContext db, int categoryId) =>
+{
+    var products = db.Products
+        .Where(p => p.CategoryId == categoryId)
+        .Include(p => p.Category)
+        .ToList();
+
+    return products.Any() ? Results.Ok(products) : Results.NotFound($"No products found in category {categoryId}.");
+});
+
+
 app.Run();
+
+
+// ✅ Define a DTO (Data Transfer Object) for the Request
+public class CartRequest
+{
+    public string UserId { get; set; }
+    public int ProductId { get; set; }
+    public int Quantity { get; set; }
+}
+
+public class UpdateCartRequest
+{
+    public string UserId { get; set; }
+    public int ProductId { get; set; }
+    public int NewQuantity { get; set; }
+}
+
+public class CompleteOrderRequest
+{
+    public string UserId { get; set; }
+    public int PaymentOptionId { get; set; }
+}
+
+public class UserPaymentMethodRequest
+{
+    public string UserId { get; set; }
+    public int PaymentOptionId { get; set; }
+}

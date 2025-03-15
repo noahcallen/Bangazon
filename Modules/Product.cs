@@ -14,7 +14,6 @@ public class Product
   public string Description { get; set; }
   public int Quantity { get; set; }
   public int CategoryId { get; set; }
-  public string SellerId { get; set; }
   public List<OrderItem> OrderItems { get; set; }
   public CartItem CartItem { get; set; }
   public Category Category { get; set; }
